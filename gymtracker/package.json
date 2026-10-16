@@ -8,7 +8,7 @@
             "configurable",
             "health"
         ],
-        "displayName": "GymTracker",
+        "displayName": "GymTracker Beta",
         "enableMultiJS": true,
         "messageKeys": [
             "ROUTINE_DATA",
@@ -39,10 +39,10 @@
             "gabbro",
             "flint"
         ],
-        "uuid": "039ac8f0-f9a6-4c1f-88ca-1217c9296134",
+        "uuid": "03c5637e-4bf7-4c13-bf7c-b9eac0407c44",
         "watchapp": {
             "watchface": false
         }
     },
-    "version": "6.16.1"
+    "version": "6.18.0"
 }

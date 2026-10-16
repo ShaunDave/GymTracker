@@ -82,7 +82,7 @@ We have built a fully automated Google Sheets Dashboard that calculates your Est
 
 **Step 1: Copy the Template**
 
-1. Click here to automatically generate a private copy of the template in your Google Drive: **[Make a copy of the GymTracker Dashboard](https://docs.google.com/spreadsheets/d/13x0sPwYGMAi21Bp_KPz4TX86V7he1Z9OsEx0OiHgj8k/copy)**
+1. Click here to automatically generate a private copy of the template in your Google Drive: **[Make a copy of the GymTracker Dashboard](https://docs.google.com/spreadsheets/d/1q1e9-1S2uV3sHKjfkFm6MOGQmd1c9ECmW8MesW6bG9w/copy)**
 
 **Step 2: Secure Your Script**
 
@@ -122,7 +122,7 @@ If you prefer to start with a blank canvas and build your own data processing lo
 1. Create a brand new [Google Sheet](https://sheets.google.com).
 2. Name it something like "Pebble Gym Logs".
 3. In the very first row of your sheet (Row 1), type out the following headers across the columns: **Date** | **Routine** | **Duration (s)** | **Exercise** | **Set #** | **Reps** | **Weight**.
-4. If you want to include any of the additional fields: Sensation, Accuracy, Density, Max HR, or Avg HR add them to Row 1 and uncomment the corresponding code (see step 5 below).
+4. If you want to include any of the additional fields: Sensation, Accuracy, Density, Per-Set Peak HR, or Per-Set Avg HR add them to Row 1 and uncomment the corresponding code (see step 5 below). The script can also append the session HR time-series.
 5. In the top menu, click **Extensions** > **Apps Script**.
 
 **Step 2: Add the Code**
@@ -130,7 +130,7 @@ If you prefer to start with a blank canvas and build your own data processing lo
 2. In this GitHub repository, open the file named [`google_sheets_script.gs`](https://github.com/oliverano95/GymTracker/blob/main/google_sheets_script.gs).
 3. Copy all the code from that file and paste it into your Google Apps Script editor.
 4. On line 15 of the code, change the `mySecretPassword` variable to a secure password of your choice.
-5. If you want to include any of the additional fields on lines 53-66 of the code: Sensation, Accuracy, Density, Max HR, or Avg HR, uncomment them.
+5. If you want to include any of the additional fields: Sensation, Accuracy, Density, Per-Set Peak HR, or Per-Set Avg HR, uncomment the corresponding lines in the code. To also write the session HR time-series to your sheet, uncomment the `HR Time Series` block in the script.
 6. Click the **Save** icon (the floppy disk).
 
 **Step 3: Deploy as a Web App**
