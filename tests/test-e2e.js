@@ -1,260 +1,117 @@
 // @ts-check
-// E2E test: Config page → close handler → pypkjs WebSocket → AppMessage → watch
+// End-to-end: config page -> phone -> watch -> phone, in the Pebble emulator.
 //
-// Full chain:
-//   1. Playwright serves config page via HTTP
-//   2. User clicks Save & Send → sendToPebble() navigates to close handler
-//   3. Close handler captures encoded JSON payload
-//   4. We connect to pypkjs WebSocket and send AppConfigResponse
-//   5. pypkjs triggers webviewclosed in pebble-js-app.js
-//   6. pebble-js-app.js handler sends AppMessage (ROUTINE_DATA) to watch
-//   7. Watch C code processes the message
+//   1. A routine is built in the real config page (Chromium) and "Save & Send"
+//      is clicked; the payload the page would hand to the Pebble app is captured.
+//   2. That payload's routine is delivered to the watch as AppMessage ROUTINE_DATA,
+//      which is exactly what the phone-side JS does with it (pkjs forwards
+//      `routineData` untouched; test-countdown-config.js covers that hop).
+//   3. The workout is run and finished on the watch.
+//   4. The workout the phone uploads to the Google endpoint, the routine the
+//      phone stores as synced back from the watch, and the URL the phone would
+//      open Settings with are checked against what the page originally sent.
+//
+// Why step 2 does not go through the emulator's WebSocket: pypkjs only accepts a
+// config response after the app's settings were opened, and then hands the response
+// to its JS engine as bytes, which the engine rejects. The page's response therefore
+// cannot be injected into the app's `webviewclosed` handler under this SDK.
+// What can be checked is that opening settings runs the app's `showConfiguration`
+// and announces the config-page URL, which is done below.
+//
+// Prerequisites: `pebble` on PATH (see pebble-helpers.js).
+// Run: cd tests && npx playwright test test-e2e.js
 
 const { test, expect } = require('@playwright/test');
-const path = require('path');
-const http = require('http');
-const fs = require('fs');
-const net = require('net');
-const { execSync } = require('child_process');
+const h = require('./pebble-helpers');
 
-const ROOT = path.resolve(__dirname, '..');
+const P = 'emery';
 
-function findFreePort() {
-  return new Promise((resolve) => {
-    const srv = net.createServer();
-    srv.listen(0, () => {
-      const port = srv.address().port;
-      srv.close(() => resolve(port));
+test.describe('Layer 2 — E2E: config page → phone → watch → phone', () => {
+  test('a routine built in the page runs on the watch and comes back intact', async ({ page }) => {
+    test.skip(!h.hasPebble(), 'pebble CLI not found on PATH');
+    test.setTimeout(300_000);
+
+    // ---- 1. Build the routine in the real page and capture what it would send ----
+    await page.goto(`file://${h.ROOT}/index_dev.html`);
+    await page.waitForFunction(() => typeof Storage !== 'undefined');
+    await page.fill('#routineName', 'E2E Routine');
+
+    const add = async ({ name, sets, reps, weight, modifier = 0 }) => {
+      await page.evaluate((n) => {
+        const sel = document.getElementById('exerciseSelect');
+        sel.appendChild(new Option(n, n));
+        sel.value = n;
+      }, name);
+      await page.fill('#targetSets', String(sets));
+      await page.fill('#targetReps', String(reps));
+      await page.selectOption('#exerciseModifier', String(modifier));
+      if (weight !== undefined) await page.fill('#targetWeight', String(weight));
+      await page.click('#addUpdateBtn');
+    };
+    await add({ name: 'Bench Press', sets: 1, reps: 10, weight: 60 });
+    await add({ name: 'Plank', sets: 1, reps: 5, modifier: 8 });
+
+    await page.evaluate(() => {
+      window.__sent = null;
+      window.alert = () => {};
+      window.sendToPebble = (cfg) => { window.__sent = cfg; };
     });
-  });
-}
+    await page.click('#btn-send-single');
+    const payload = await page.evaluate(() => window.__sent);
 
-function getPypkjsPort() {
-  try {
-    const out = execSync('pgrep -af pypkjs', { encoding: 'utf8' });
-    const m = out.match(/--port (\d+)/);
-    return m ? parseInt(m[1]) : null;
-  } catch {
-    return null;
-  }
-}
+    const expectedRoutine = 'E2E Routine|Bench Press|1|10|60|0|-|Plank|1|5|0|8|-';
+    expect(payload.routineData).toBe(expectedRoutine);
+    expect(encodeURIComponent(JSON.stringify(payload)).length)
+      .toBeLessThanOrEqual(await page.evaluate(() => MAX_CONFIG_RESPONSE));
 
-// Raw WebSocket client (no deps)
-const crypto = require('crypto');
-
-function wsHandshake(host, port) {
-  return new Promise((resolve, reject) => {
-    const sock = net.createConnection({ host, port }, () => {
-      const key = crypto.randomBytes(16).toString('base64');
-      const req = [
-        `GET / HTTP/1.1`,
-        `Host: ${host}:${port}`,
-        `Upgrade: websocket`,
-        `Connection: Upgrade`,
-        `Sec-WebSocket-Key: ${key}`,
-        `Sec-WebSocket-Version: 13`,
-        '', ''
-      ].join('\r\n');
-      sock.write(req);
-
-      let data = Buffer.alloc(0);
-      const onData = (chunk) => {
-        data = Buffer.concat([data, chunk]);
-        if (data.toString().includes('\r\n\r\n')) {
-          sock.removeListener('data', onData);
-          if (data.includes('101')) {
-            resolve(sock);
-          } else {
-            reject(new Error(`Handshake failed: ${data.toString().slice(0, 200)}`));
-          }
-        }
-      };
-      sock.on('data', onData);
-    });
-    sock.on('error', reject);
-  });
-}
-
-function wsSendBinary(sock, payload) {
-  // Client → server: must mask
-  const mask = crypto.randomBytes(4);
-  let header;
-  if (payload.length < 126) {
-    header = Buffer.alloc(2);
-    header[0] = 0x82; // FIN + BINARY
-    header[1] = payload.length | 0x80; // MASK
-  } else if (payload.length < 65536) {
-    header = Buffer.alloc(4);
-    header[0] = 0x82;
-    header[1] = 126 | 0x80;
-    header.writeUInt16BE(payload.length, 2);
-  } else {
-    header = Buffer.alloc(10);
-    header[0] = 0x82;
-    header[1] = 127 | 0x80;
-    header.writeBigUInt64BE(BigInt(payload.length), 2);
-  }
-  const masked = Buffer.alloc(payload.length);
-  for (let i = 0; i < payload.length; i++) {
-    masked[i] = payload[i] ^ mask[i % 4];
-  }
-  sock.write(Buffer.concat([header, mask, masked]));
-}
-
-function buildAppConfigResponse(queryString) {
-  // AppConfigResponse: length (4 bytes LE) + data (UTF-8 string)
-  const dataBuf = Buffer.from(queryString, 'utf8');
-  const lenBuf = Buffer.alloc(4);
-  lenBuf.writeUInt32LE(dataBuf.length, 0);
-  const configResp = Buffer.concat([lenBuf, dataBuf]);
-
-  // WebSocketPhonesimAppConfig: command byte 0x02 (AppConfigResponse) + config
-  const phonesimMsg = Buffer.concat([Buffer.from([0x02]), configResp]);
-
-  // Endpoint 0x0a for WebSocketPhonesimAppConfig
-  const framed = Buffer.concat([Buffer.from([0x0a]), phonesimMsg]);
-  return framed;
-}
-
-test.describe('E2E — Full emulator flow', () => {
-  test('Config page → close handler → pypkjs WebSocket → payload delivered', async ({ page }) => {
-    const pypkjsPort = getPypkjsPort();
-    test.skip(!pypkjsPort, 'pypkjs not running (run pebble install --emulator basalt first)');
-
-    const syncDict = { A: 'A|-1|2|Bench Press|3|10|60|0|-|-' };
-
-    // Start config page server
-    const pagePort = await findFreePort();
-    const pageServer = await new Promise((resolve) => {
-      const srv = http.createServer((req, res) => {
-        const url = new URL(req.url, 'http://localhost');
-        const filePath = path.join(ROOT, url.pathname === '/' ? '/index_dev.html' : url.pathname);
-        if (!fs.existsSync(filePath)) { res.writeHead(404); res.end(); return; }
-        const ext = path.extname(filePath);
-        const mime = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css' }[ext] || 'text/plain';
-        res.writeHead(200, { 'Content-Type': mime });
-        res.end(fs.readFileSync(filePath));
-      });
-      srv.listen(pagePort, () => resolve(srv));
-    });
-
-    // Start close handler
-    const closePort = await findFreePort();
-    let capturedQuery = null;
-    const closeServer = await new Promise((resolve) => {
-      const srv = http.createServer((req, res) => {
-        const url = new URL(req.url, 'http://localhost');
-        if (url.pathname === '/close') {
-          capturedQuery = url.search ? url.search.slice(1) : '';
-          res.writeHead(200);
-          res.end('OK');
-        } else {
-          res.writeHead(404);
-          res.end();
-        }
-      });
-      srv.listen(closePort, () => resolve(srv));
-    });
-
+    // ---- 2. Phone and watch ----
+    const capture = await h.startCaptureServer();
     try {
-      // Open config page with return_to pointing to our close handler
-      const syncParam = encodeURIComponent(JSON.stringify(syncDict));
-      const configUrl = `http://127.0.0.1:${pagePort}/index_dev.html?sync=${syncParam}&return_to=http%3A%2F%2Flocalhost%3A${closePort}%2Fclose%3F`;
+      h.startEmulator(P, { phoneStorage: { googleUrl: capture.url, googlePwd: 'pw' } });
 
-      await page.goto(configUrl);
-      await page.waitForFunction(() => {
-        const sel = document.getElementById('savedRoutineSelect');
-        return sel && sel.options.length > 1;
-      }, { timeout: 5000 });
+      // What the phone does with the page's response: forward the routine to the watch
+      h.sendRoutineToWatch(P, payload.routineData);
+      await h.sleep(1000);
+      h.pebble(['install', '--emulator', P]);            // relaunch so the routine list reloads
+      await h.sleep(2500);
 
-      // Select A, override sendToPebble to navigate to our close handler
-      await page.selectOption('#savedRoutineSelect', 'A');
+      // ---- 3. Run the workout on the watch ----
+      h.press(P, 'select');                               // open the routine
+      await h.sleep(1500);
+      h.longPress(P, 'select');                           // Bench Press: log the pre-filled 10 x 60
+      await h.sleep(1000);
+      h.press(P, 'select');                               // skip the rest timer
+      await h.sleep(1000);
+      h.press(P, 'up', { times: 5, interval: 200 });      // Plank (count down): exactly its 5 s target
+      await h.sleep(600);
+      h.longPress(P, 'select');                           // last set -> how did it feel?
+      await h.sleep(1000);
+      h.press(P, 'select');                               // default answer -> summary, uploads
+      await h.waitFor(() => capture.posts.length > 0, { timeout: 30_000, message: 'workout upload' });
 
-      // Override sendToPebble so it navigates to our close handler
-      await page.evaluate((closePort) => {
-        window.sendToPebble = function(configData) {
-          const encoded = encodeURIComponent(JSON.stringify(configData));
-          window.location.href = `http://localhost:${closePort}/close?${encoded}`;
-        };
-      }, closePort);
+      // ---- 4. What the phone received ----
+      const summary = h.parseWorkoutSummary(capture.posts[0].workoutData);
+      expect(summary.routine).toBe('E2E Routine');
+      expect(summary.exercises).toEqual([
+        { name: 'Bench Press', sets: [{ reps: 10, weight: 60 }] },
+        { name: 'Plank [TIMED]', sets: [{ reps: 5, weight: 0 }] },
+      ]);
 
-      // Intercept navigation to capture payload (don't actually navigate)
-      let payload = null;
-      page.on('request', (req) => {
-        const url = req.url();
-        if (url.includes('/close?')) {
-          const query = url.split('/close?')[1] || '';
-          payload = JSON.parse(decodeURIComponent(query));
-        }
-      });
+      const syncedBack = 'E2E Routine|-1|2|Bench Press|1|10|60|0|-|Plank|1|5|0|8|-';
+      const stored = h.readPhoneStorage();
+      expect(JSON.parse(stored.synced_routines)['E2E Routine']).toBe(syncedBack);
 
-      await page.click('#btn-send-single');
-      await page.waitForTimeout(500);
-
-      // Also check if close handler captured it directly
-      if (!payload && capturedQuery) {
-        payload = JSON.parse(decodeURIComponent(capturedQuery));
-      }
-
-      expect(payload).not.toBeNull();
-      console.log('Payload captured:', JSON.stringify(payload, null, 2));
-
-      // Verify payload structure — selecting A and saving without rename/delete
-      // means updatedSync has A, no deletedKeys
-      expect(payload.updatedSync).toHaveProperty('A');
-      expect(payload.progressionMode).toBeDefined();
-      expect(payload.weightIncrement).toBeDefined();
-
-      // Verify payload size
-      const size = JSON.stringify(payload).length;
-      expect(size).toBeLessThan(450);
-      console.log(`Payload size: ${size} chars (< 450: YES)`);
-
-      // Step 4: Send AppConfigResponse to pypkjs via WebSocket
-      console.log(`\nConnecting to pypkjs WebSocket on port ${pypkjsPort}...`);
-      const sock = await wsHandshake('localhost', pypkjsPort);
-      console.log('WebSocket connected!');
-
-      // Build and send AppConfigResponse
-      const queryStr = capturedQuery || encodeURIComponent(JSON.stringify(payload));
-      const framed = buildAppConfigResponse(queryStr);
-      wsSendBinary(sock, framed);
-      console.log('AppConfigResponse sent to pypkjs!');
-      console.log('  Endpoint: 0x0a (WebSocketPhonesimAppConfig)');
-      console.log('  Command: 0x02 (AppConfigResponse)');
-      console.log(`  Data length: ${queryStr.length} bytes`);
-
-      // Wait for pypkjs to process
-      await new Promise(r => setTimeout(r, 2000));
-
-      // Try to read any response from pypkjs
-      try {
-        sock.setReadable(true);
-        const chunks = [];
-        sock.on('data', (chunk) => chunks.push(chunk));
-        await new Promise(r => setTimeout(r, 1000));
-        if (chunks.length > 0) {
-          console.log('Response from pypkjs:', Buffer.concat(chunks).toString('hex').slice(0, 100));
-        } else {
-          console.log('No response from pypkjs (normal — async processing)');
-        }
-      } catch (e) {
-        console.log('Could not read response:', e.message);
-      }
-
-      sock.destroy();
-
-      console.log('\n=== E2E CHAIN COMPLETE ===');
-      console.log('1. Config page built payload ✓');
-      console.log('2. Close handler captured payload ✓');
-      console.log('3. AppConfigResponse sent to pypkjs ✓');
-      console.log('4. pypkjs should trigger webviewclosed → AppMessage → watch');
-      console.log('\nNOTE: Verifying steps 4-5 requires pebble logs, which stream');
-      console.log('continuously. Check manually with: pebble logs --emulator basalt');
-
+      // ---- 5. Opening settings again runs the app's showConfiguration, and the
+      //         page URL it announces carries the synced routine and the workout.
+      //         (Done last: leaving a settings session open stalls the phone-side
+      //         JS in the emulator.)
+      const settings = new URL(await h.getConfigUrlFromPhone());
+      expect(JSON.parse(settings.searchParams.get('sync'))['E2E Routine']).toBe(syncedBack);
+      const history = JSON.parse(settings.searchParams.get('history'));
+      expect(history.map((w) => w.data)).toEqual([capture.posts[0].workoutData]);
     } finally {
-      pageServer.close();
-      closeServer.close();
+      capture.close();
+      h.killEmulator();
     }
   });
 });

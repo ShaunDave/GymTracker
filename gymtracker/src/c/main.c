@@ -8,6 +8,11 @@
 #define EXPORT_BUF_SIZE 2048
 #define MAX_HR_SERIES 180
 
+// Timed modifiers: 6 = count up, 8 = count down. Both log elapsed seconds.
+#define MOD_TIMED_UP   6
+#define MOD_TIMED_DOWN 8
+#define IS_TIMED(m)    ((m) == MOD_TIMED_UP || (m) == MOD_TIMED_DOWN)
+
 #define STORAGE_KEY_BASE   100
 #define SETTINGS_KEY_BASE  200
 #define ACTIVE_STATE_KEY   300
@@ -524,7 +529,7 @@ static void parse_routine_string(const char *data) {
           else if (field == 4) {
             ex->modifier = atoi(temp);
             if (ex->modifier == 4) { ex->modifier = 0; ex->target_weight = 0; }
-            if (ex->modifier == 6) { ex->target_weight = 0; }
+            if (IS_TIMED(ex->modifier)) { ex->target_weight = 0; }
             if (ex->modifier == 1) {
               ex->target_sets *= 2;
             }
@@ -709,7 +714,7 @@ static void init_temp_values(Exercise *ex) {
   }
 
   // Modifiers and Final Assignment
-  if (ex->modifier == 6) {
+  if (IS_TIMED(ex->modifier)) {
     s_app.state.temp_reps = 0;
   } else {
     s_app.state.temp_reps = base_reps;
@@ -1170,9 +1175,12 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
 
     if (s_app.state.is_timed_active) {
       if (s_app.state.curr_ex_idx < s_app.state.total_exercises) {
+        Exercise *tex = &s_app.state.exercises[s_app.state.curr_ex_idx];
         s_app.state.temp_reps++;
-        if (s_app.state.temp_reps == s_app.state.exercises[s_app.state.curr_ex_idx].target_reps)
-          vibes_long_pulse();
+        if (s_app.state.temp_reps == tex->target_reps) {
+          if (tex->modifier == MOD_TIMED_DOWN) vibes_double_pulse();
+          else                                 vibes_long_pulse();
+        }
         update_workout_ui(false);
       }
     }
@@ -2044,7 +2052,7 @@ static void summary_window_load(Window *window) {
     }
 
     if (s_app.settings.progression_mode != -1 && ex_misses == 0) {
-      if (s_app.state.exercises[i].modifier == 6) {
+      if (IS_TIMED(s_app.state.exercises[i].modifier)) {
         int increase = (s_app.state.exercises[i].target_reps * 5) / 100;
         if (increase < 1) increase = 1;
         s_app.state.exercises[i].target_reps += increase;
@@ -2120,7 +2128,7 @@ static void summary_window_load(Window *window) {
     const char *mod_label = "";
     if      (s_app.state.exercises[i].modifier == 1) mod_label = " [DROP]";
     else if (s_app.state.exercises[i].modifier == 2) mod_label = " [SUPER]";
-    else if (s_app.state.exercises[i].modifier == 6) mod_label = " [TIMED]";
+    else if (IS_TIMED(s_app.state.exercises[i].modifier)) mod_label = " [TIMED]";
     else if (s_app.state.exercises[i].modifier == 7) mod_label = " [GIANT]";
     written = snprintf(export_buf + offset, limit - offset, "|%s%s",
                        s_app.state.exercises[i].name, mod_label);
@@ -3290,11 +3298,20 @@ static void update_workout_ui(bool animate_box) {
     snprintf(set_buf, sizeof(set_buf), "Set %d of %d", ex->current_set, ex->target_sets);
   }
   text_layer_set_text(s_app.ui.set_layer, set_buf);
-  text_layer_set_text(s_app.ui.label_reps_layer, (ex->modifier == 6) ? "Secs" : "Reps");
+  text_layer_set_text(s_app.ui.label_reps_layer, IS_TIMED(ex->modifier) ? "Secs" : "Reps");
 
   static char t_reps_buf[32], t_weight_buf[32], reps_buf[16], weight_buf[16];
-  snprintf(t_reps_buf,   sizeof(t_reps_buf),   "Target: %d", active_target_reps);
-  snprintf(reps_buf,     sizeof(reps_buf),     "%d",          s_app.state.temp_reps);
+  if (ex->modifier == MOD_TIMED_DOWN) {
+    // Big number = seconds remaining, then "+N" overtime once past the target;
+    // small box = the target, as with count up. temp_reps stays the elapsed time that gets logged.
+    int remaining = active_target_reps - s_app.state.temp_reps;
+    snprintf(t_reps_buf, sizeof(t_reps_buf), "Target: %d", active_target_reps);
+    if (remaining < 0) snprintf(reps_buf, sizeof(reps_buf), "+%d", -remaining);
+    else               snprintf(reps_buf, sizeof(reps_buf), "%d",  remaining);
+  } else {
+    snprintf(t_reps_buf, sizeof(t_reps_buf), "Target: %d", active_target_reps);
+    snprintf(reps_buf,   sizeof(reps_buf),   "%d",         s_app.state.temp_reps);
+  }
   snprintf(t_weight_buf, sizeof(t_weight_buf), "Target: %d", active_target_weight);
   snprintf(weight_buf,   sizeof(weight_buf),   "%d",          s_app.state.temp_weight);
 
@@ -3456,7 +3473,7 @@ static void wo_down_long_click(ClickRecognizerRef r, void *ctx) { execute_shortc
 static void wo_select_short_click(ClickRecognizerRef r, void *ctx) {
   if (s_app.state.is_resting) { skip_rest(); return; }
   if (s_app.state.curr_ex_idx < s_app.state.total_exercises &&
-      s_app.state.exercises[s_app.state.curr_ex_idx].modifier == 6) {
+      IS_TIMED(s_app.state.exercises[s_app.state.curr_ex_idx].modifier)) {
     s_app.state.is_timed_active = !s_app.state.is_timed_active;
   } else if (s_app.state.curr_ex_idx < s_app.state.total_exercises &&
              s_app.state.exercises[s_app.state.curr_ex_idx].target_weight == 0) {

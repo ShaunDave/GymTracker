@@ -92,6 +92,7 @@
         .badge-bodyweight { background: var(--green); }
         .badge-bw-drop    { background: #6f42c1; }
         .badge-timed      { background: #fd7e14; }
+        .badge-countdown  { background: #20c997; }
 
         /* ── Superset styling ── */
         .superset-link { border-left: 4px solid var(--blue); background: #f4f9ff; }
@@ -184,6 +185,7 @@
             <option value="2">Superset</option>
             <option value="3">Warmup</option>
             <option value="6">Timed (Count up)</option>
+            <option value="8">Timed (Count down)</option>
             <option value="7">Giant Set</option>
         </select>
         <div id="modifierDesc" class="modifier-desc">Standard exercise execution with regular rest periods.</div>
@@ -347,6 +349,7 @@ const MODIFIER_META = {
     2: { desc: '<strong>Superset:</strong> Links this exercise with the <strong>NEXT</strong> exercise. The watch bounces between the two until all sets are done.', borderColor: '#007bff' },
     3: { desc: '<strong>Warmup:</strong> Executes normally but the watch cuts the rest timer in half between sets.', borderColor: '#ffc107' },
     6: { desc: '<strong>Timed Exercise:</strong> "Target Reps" = Target Seconds. Press Select to start the timer. Target Weight is ignored.', borderColor: '#fd7e14' },
+    8: { desc: '<strong>Timed (Count down):</strong> "Target Reps" = Target Seconds. Press Select to start; the watch counts down and buzzes twice at zero, then shows +N overtime. The total time held is logged. Target Weight is ignored.', borderColor: '#20c997' },
     7: { desc: '<strong>Giant Set:</strong> Links this exercise with the <strong>NEXT TWO</strong> exercises. The watch bounces across all three until all sets are done. All three must have the same target sets.', borderColor: '#6f42c1' }
 };
 
@@ -543,7 +546,7 @@ function updateModifierDesc() {
     desc.style.borderLeftColor = meta.borderColor;
 
     // UX: adapt form field labels and placeholders to the selected modifier
-    const isTimed    = val === '6';
+    const isTimed    = val === '6' || val === '8';
     const repsInput  = document.getElementById('targetReps');
     const repsLabel  = document.getElementById('labelTargetReps');
     const weightInput  = document.getElementById('targetWeight');
@@ -662,7 +665,8 @@ function renderRoutine() {
         if (isGiantThirdHalf)      badges += '<span class="mod-badge badge-giant-3">GIANT 3/3</span> ';
         if (modifier === 3)        badges += '<span class="mod-badge badge-warmup">WARMUP</span> ';
         if (modifier === 6)        badges += '<span class="mod-badge badge-timed">TIMED</span> ';
-        if (modifier !== 6 && weight === 0) {
+        if (modifier === 8)        badges += '<span class="mod-badge badge-countdown">COUNTDOWN</span> ';
+        if (modifier !== 6 && modifier !== 8 && weight === 0) {
             badges += modifier === 1
                 ? '<span class="mod-badge badge-bw-drop">BW DROP</span> '
                 : '<span class="mod-badge badge-bodyweight">BODYWEIGHT</span> ';
@@ -696,7 +700,7 @@ function renderRoutine() {
                 ${handle}
                 <div class="exercise-details">
                     <div style="line-height:1.2;margin-bottom:4px;"><strong>${ex[0]}</strong> ${badges}</div>
-                    <div>${ex[1]}s × ${modifier === 6 ? ex[2] + 'sec' : ex[2] + 'r'} @ ${weight === 0 ? (modifier === 6 ? '—' : 'BW') : weight + 'kg'}</div>
+                    <div>${ex[1]}s × ${(modifier === 6 || modifier === 8) ? ex[2] + 'sec' : ex[2] + 'r'} @ ${weight === 0 ? ((modifier === 6 || modifier === 8) ? '—' : 'BW') : weight + 'kg'}</div>
                     ${comment}
                 </div>
             </div>
@@ -751,7 +755,7 @@ function addExercise() {
     const reps     = document.getElementById('targetReps').value;
     const weight   = document.getElementById('targetWeight').value;
     const modifier = parseInt(document.getElementById('exerciseModifier').value, 10);
-    const isTimed  = modifier === 6;
+    const isTimed  = modifier === 6 || modifier === 8;
 
     if (sets === '' || reps === '') {
         alert(isTimed

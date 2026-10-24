@@ -4,8 +4,10 @@ const path = require('path');
 
 module.exports = defineConfig({
   testDir: '.',
-  testMatch: ['test-config-page.js', 'emulator.js', 'test-csv-export.js', 'test-e2e.js'],
+  testMatch: ['test-config-page.js', 'emulator.js', 'test-csv-export.js', 'test-e2e.js',
+              'test-countdown-config.js', 'test-countdown-watch.js'],
   timeout: 60_000,
+  snapshotPathTemplate: '{testDir}/golden/{arg}{ext}',
   expect: { timeout: 5_000 },
   fullyParallel: false,
   retries: 0,
